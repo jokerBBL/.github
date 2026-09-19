@@ -1,0 +1,123 @@
+import os
+import asyncio
+import discord
+from discord.ext import commands
+from aiohttp import web
+
+# --- 1. クイズのデータ設定 ---
+QUIZ_DATA = [
+    {
+        "question": "日本で一番高い山はどこでしょう？",
+        "options": ["1. 富士山", "2. 北岳", "3. 穂高岳"],
+        "answer": "1"
+    },
+    {
+        "question": "Pythonの拡張子はどれでしょう？",
+        "options": ["1. .js", "2. .py", "3. .java"],
+        "answer": "2"
+    },
+    {
+        "question": "Discordのテキストチャンネルを表す記号は？",
+        "options": ["1. @", "2. #", "3. $"],
+        "answer": "2"
+    }
+]
+
+# --- 2. Discord Botの設定 ---
+intents = discord.Intents.default()
+intents.message_content = True  # メッセージ内容を取得するためのIntent
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# 進行中のクイズ状態を管理する辞書 { channel_id: { "answer": str, "active": bool } }
+active_quizzes = {}
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+
+@bot.command(name="quiz")
+async def start_quiz(ctx):
+    """クイズを出題するコマンド"""
+    channel_id = ctx.channel.id
+
+    # 既にクイズが進行中かチェック
+    if active_quizzes.get(channel_id, {}).get("active"):
+        await ctx.send("⚠️ すでにこのチャンネルでクイズが進行中です！回答を待っています。")
+        return
+
+    import random
+    quiz = random.choice(QUIZ_DATA)
+
+    # クイズの状態を保存
+    active_quizzes[channel_id] = {
+        "answer": quiz["answer"],
+        "active": True
+    }
+
+    options_text = "\n".join(quiz["options"])
+    embed = discord.Embed(
+        title="❓ クイズ問題",
+        description=f"**{quiz['question']}**\n\n{options_text}\n\n数字（1, 2, 3 など）で答えてね！",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+@bot.event
+async def on_message(message):
+    # Bot自身のメッセージは無視
+    if message.author.bot:
+        return
+
+    channel_id = message.channel.id
+    quiz_state = active_quizzes.get(channel_id)
+
+    # このチャンネルでクイズが進行中の場合、回答をチェック
+    if quiz_state and quiz_state.get("active"):
+        user_input = message.content.strip()
+
+        # 1, 2, 3 などの数字による回答か判定
+        if user_input in ["1", "2", "3"]:
+            correct_answer = quiz_state["answer"]
+            if user_input == correct_answer:
+                await message.channel.send(f"🎉 **正解！** {message.author.mention} さん、大正解です！")
+            else:
+                await message.channel.send(f"❌ **不正解...** 正解は `{correct_answer}` でした！")
+
+            # クイズ終了処理
+            active_quizzes[channel_id]["active"] = False
+            return
+
+    # 通常のコマンド処理を実行
+    await bot.process_commands(message)
+
+
+# --- 3. Render向けのHTTP Webサーバー ---
+async def handle_health_check(request):
+    """Renderのポート監視・ヘルスチェック用エンドポイント"""
+    return web.Response(text="Bot is running!")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    
+    # Render環境変数 PORT からポートを取得（ローカル動作時はデフォルト8080）
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"HTTP health check server running on port {port}")
+
+
+# --- 4. メイン起動ルーチン ---
+async def main():
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("環境変数 'DISCORD_TOKEN' が設定されていません。")
+
+    # HTTPサーバーとDiscord Botを並行して起動
+    await start_http_server()
+    await bot.start(token)
+
+if __name__ == "__main__":
+    asyncio.run(main())
